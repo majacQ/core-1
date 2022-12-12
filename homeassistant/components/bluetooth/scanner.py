@@ -16,6 +16,7 @@ from bleak.backends.bluezdbus.advertisement_monitor import OrPattern
 from bleak.backends.bluezdbus.scanner import BlueZScannerArgs
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData, AdvertisementDataCallback
+from bleak_retry_connector import restore_discoveries
 from bluetooth_adapters import DEFAULT_ADDRESS
 from dbus_fast import InvalidMessageError
 
@@ -131,6 +132,7 @@ class HaScanner(BaseHaScanner):
         """Init bluetooth discovery."""
         source = address if address != DEFAULT_ADDRESS else adapter or SOURCE_LOCAL
         super().__init__(hass, source, adapter)
+        self.connectable = True
         self.mode = mode
         self.adapter = adapter
         self._start_stop_lock = asyncio.Lock()
@@ -314,6 +316,7 @@ class HaScanner(BaseHaScanner):
 
         self.scanning = True
         self._async_setup_scanner_watchdog()
+        await restore_discoveries(self.scanner, self.adapter)
 
     @hass_callback
     def _async_setup_scanner_watchdog(self) -> None:

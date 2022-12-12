@@ -1,7 +1,7 @@
 """Base classes for HA Bluetooth scanners for bluetooth."""
 from __future__ import annotations
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 import datetime
@@ -11,13 +11,21 @@ from typing import Any, Final
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 from bleak_retry_connector import NO_RSSI_VALUE
-from bluetooth_adapters import adapter_human_name
+from bluetooth_adapters import DiscoveredDeviceAdvertisementData, adapter_human_name
 from home_assistant_bluetooth import BluetoothServiceInfoBleak
 
-from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback as hass_callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import (
+    CALLBACK_TYPE,
+    Event,
+    HomeAssistant,
+    callback as hass_callback,
+)
 from homeassistant.helpers.event import async_track_time_interval
+import homeassistant.util.dt as dt_util
 from homeassistant.util.dt import monotonic_time_coarse
 
+from . import models
 from .const import (
     CONNECTABLE_FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS,
     FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS,
@@ -27,15 +35,25 @@ from .models import HaBluetoothConnector
 MONOTONIC_TIME: Final = monotonic_time_coarse
 
 
-class BaseHaScanner:
+class BaseHaScanner(ABC):
     """Base class for Ha Scanners."""
 
-    __slots__ = ("hass", "source", "_connecting", "name", "scanning")
+    __slots__ = (
+        "hass",
+        "connectable",
+        "source",
+        "connector",
+        "_connecting",
+        "name",
+        "scanning",
+    )
 
     def __init__(self, hass: HomeAssistant, source: str, adapter: str) -> None:
         """Initialize the scanner."""
         self.hass = hass
+        self.connectable = False
         self.source = source
+        self.connector: HaBluetoothConnector | None = None
         self._connecting = 0
         self.name = adapter_human_name(adapter, source) if adapter != source else source
         self.scanning = True
@@ -67,12 +85,15 @@ class BaseHaScanner:
         """Return diagnostic information about the scanner."""
         return {
             "type": self.__class__.__name__,
-            "discovered_devices": [
+            "discovered_devices_and_advertisement_data": [
                 {
-                    "name": device.name,
-                    "address": device.address,
+                    "name": device_adv[0].name,
+                    "address": device_adv[0].address,
+                    "rssi": device_adv[0].rssi,
+                    "advertisement_data": device_adv[1],
+                    "details": device_adv[0].details,
                 }
-                for device in self.discovered_devices
+                for device_adv in self.discovered_devices_and_advertisement_data.values()
             ],
         }
 
@@ -84,10 +105,9 @@ class BaseHaRemoteScanner(BaseHaScanner):
         "_new_info_callback",
         "_discovered_device_advertisement_datas",
         "_discovered_device_timestamps",
-        "_connector",
-        "_connectable",
         "_details",
         "_expire_seconds",
+        "_storage",
     )
 
     def __init__(
@@ -106,12 +126,13 @@ class BaseHaRemoteScanner(BaseHaScanner):
             str, tuple[BLEDevice, AdvertisementData]
         ] = {}
         self._discovered_device_timestamps: dict[str, float] = {}
-        self._connector = connector
-        self._connectable = connectable
+        self.connectable = connectable
+        self.connector = connector
         self._details: dict[str, str | HaBluetoothConnector] = {"source": scanner_id}
         self._expire_seconds = FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS
+        assert models.MANAGER is not None
+        self._storage = models.MANAGER.storage
         if connectable:
-            self._details["connector"] = connector
             self._expire_seconds = (
                 CONNECTABLE_FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS
             )
@@ -119,8 +140,39 @@ class BaseHaRemoteScanner(BaseHaScanner):
     @hass_callback
     def async_setup(self) -> CALLBACK_TYPE:
         """Set up the scanner."""
-        return async_track_time_interval(
+        if history := self._storage.async_get_advertisement_history(self.source):
+            self._discovered_device_advertisement_datas = (
+                history.discovered_device_advertisement_datas
+            )
+            self._discovered_device_timestamps = history.discovered_device_timestamps
+            # Expire anything that is too old
+            self._async_expire_devices(dt_util.utcnow())
+
+        cancel_track = async_track_time_interval(
             self.hass, self._async_expire_devices, timedelta(seconds=30)
+        )
+        cancel_stop = self.hass.bus.async_listen(
+            EVENT_HOMEASSISTANT_STOP, self._save_history
+        )
+
+        @hass_callback
+        def _cancel() -> None:
+            self._save_history()
+            cancel_track()
+            cancel_stop()
+
+        return _cancel
+
+    def _save_history(self, event: Event | None = None) -> None:
+        """Save the history."""
+        self._storage.async_set_advertisement_history(
+            self.source,
+            DiscoveredDeviceAdvertisementData(
+                self.connectable,
+                self._expire_seconds,
+                self._discovered_device_advertisement_datas,
+                self._discovered_device_timestamps,
+            ),
         )
 
     def _async_expire_devices(self, _datetime: datetime.datetime) -> None:
@@ -160,6 +212,7 @@ class BaseHaRemoteScanner(BaseHaScanner):
         service_data: dict[str, bytes],
         manufacturer_data: dict[int, bytes],
         tx_power: int | None,
+        details: dict[Any, Any],
     ) -> None:
         """Call the registered callback."""
         now = MONOTONIC_TIME()
@@ -199,7 +252,7 @@ class BaseHaRemoteScanner(BaseHaScanner):
         device = BLEDevice(  # type: ignore[no-untyped-call]
             address=address,
             name=local_name,
-            details=self._details,
+            details=self._details | details,
             rssi=rssi,  # deprecated, will be removed in newer bleak
         )
         self._discovered_device_advertisement_datas[address] = (
@@ -218,7 +271,23 @@ class BaseHaRemoteScanner(BaseHaScanner):
                 source=self.source,
                 device=device,
                 advertisement=advertisement_data,
-                connectable=self._connectable,
+                connectable=self.connectable,
                 time=now,
             )
         )
+
+    async def async_diagnostics(self) -> dict[str, Any]:
+        """Return diagnostic information about the scanner."""
+        return await super().async_diagnostics() | {
+            "type": self.__class__.__name__,
+            "discovered_devices_and_advertisement_data": [
+                {
+                    "name": device_adv[0].name,
+                    "address": device_adv[0].address,
+                    "rssi": device_adv[0].rssi,
+                    "advertisement_data": device_adv[1],
+                    "details": device_adv[0].details,
+                }
+                for device_adv in self.discovered_devices_and_advertisement_data.values()
+            ],
+        }
