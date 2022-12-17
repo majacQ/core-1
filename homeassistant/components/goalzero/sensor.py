@@ -11,15 +11,15 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    ELECTRIC_POTENTIAL_VOLT,
     ENERGY_WATT_HOUR,
     PERCENTAGE,
-    POWER_WATT,
     SIGNAL_STRENGTH_DECIBELS,
     TEMP_CELSIUS,
     TIME_MINUTES,
     TIME_SECONDS,
     UnitOfElectricCurrent,
+    UnitOfElectricPotential,
+    UnitOfPower,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
@@ -34,7 +34,7 @@ SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
         key="wattsIn",
         name="Watts in",
         device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=POWER_WATT,
+        native_unit_of_measurement=UnitOfPower.WATT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     SensorEntityDescription(
@@ -49,7 +49,7 @@ SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
         key="wattsOut",
         name="Watts out",
         device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=POWER_WATT,
+        native_unit_of_measurement=UnitOfPower.WATT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     SensorEntityDescription(
@@ -79,7 +79,7 @@ SENSOR_TYPES: tuple[SensorEntityDescription, ...] = (
         key="volts",
         name="Volts",
         device_class=SensorDeviceClass.VOLTAGE,
-        native_unit_of_measurement=ELECTRIC_POTENTIAL_VOLT,
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
         entity_registry_enabled_default=False,
     ),
     SensorEntityDescription(

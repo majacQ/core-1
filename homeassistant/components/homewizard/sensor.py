@@ -1,7 +1,6 @@
 """Creates Homewizard sensor entities."""
 from __future__ import annotations
 
-import logging
 from typing import Final, cast
 
 from homeassistant.components.sensor import (
@@ -14,7 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ENERGY_KILO_WATT_HOUR,
     PERCENTAGE,
-    POWER_WATT,
+    UnitOfPower,
     UnitOfVolume,
 )
 from homeassistant.core import HomeAssistant
@@ -26,7 +25,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN, DeviceResponseEntry
 from .coordinator import HWEnergyDeviceUpdateCoordinator
 
-_LOGGER = logging.getLogger(__name__)
+PARALLEL_UPDATES = 1
 
 SENSORS: Final[tuple[SensorEntityDescription, ...]] = (
     SensorEntityDescription(
@@ -87,28 +86,28 @@ SENSORS: Final[tuple[SensorEntityDescription, ...]] = (
     SensorEntityDescription(
         key="active_power_w",
         name="Active power",
-        native_unit_of_measurement=POWER_WATT,
+        native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     SensorEntityDescription(
         key="active_power_l1_w",
         name="Active power L1",
-        native_unit_of_measurement=POWER_WATT,
+        native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     SensorEntityDescription(
         key="active_power_l2_w",
         name="Active power L2",
-        native_unit_of_measurement=POWER_WATT,
+        native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
     ),
     SensorEntityDescription(
         key="active_power_l3_w",
         name="Active power L3",
-        native_unit_of_measurement=POWER_WATT,
+        native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
     ),

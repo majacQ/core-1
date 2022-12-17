@@ -6,6 +6,7 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 import datetime
 from datetime import timedelta
+import logging
 from typing import Any, Final
 
 from bleak.backends.device import BLEDevice
@@ -29,10 +30,13 @@ from . import models
 from .const import (
     CONNECTABLE_FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS,
     FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS,
+    SCANNER_WATCHDOG_INTERVAL,
+    SCANNER_WATCHDOG_TIMEOUT,
 )
 from .models import HaBluetoothConnector
 
 MONOTONIC_TIME: Final = monotonic_time_coarse
+_LOGGER = logging.getLogger(__name__)
 
 
 class BaseHaScanner(ABC):
@@ -46,17 +50,68 @@ class BaseHaScanner(ABC):
         "_connecting",
         "name",
         "scanning",
+        "_last_detection",
+        "_start_time",
+        "_cancel_watchdog",
     )
 
-    def __init__(self, hass: HomeAssistant, source: str, adapter: str) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        source: str,
+        adapter: str,
+        connector: HaBluetoothConnector | None = None,
+    ) -> None:
         """Initialize the scanner."""
         self.hass = hass
         self.connectable = False
         self.source = source
-        self.connector: HaBluetoothConnector | None = None
+        self.connector = connector
         self._connecting = 0
         self.name = adapter_human_name(adapter, source) if adapter != source else source
         self.scanning = True
+        self._last_detection = 0.0
+        self._start_time = 0.0
+        self._cancel_watchdog: CALLBACK_TYPE | None = None
+
+    @hass_callback
+    def _async_stop_scanner_watchdog(self) -> None:
+        """Stop the scanner watchdog."""
+        if self._cancel_watchdog:
+            self._cancel_watchdog()
+            self._cancel_watchdog = None
+
+    @hass_callback
+    def _async_setup_scanner_watchdog(self) -> None:
+        """If something has restarted or updated, we need to restart the scanner."""
+        self._start_time = self._last_detection = MONOTONIC_TIME()
+        if not self._cancel_watchdog:
+            self._cancel_watchdog = async_track_time_interval(
+                self.hass, self._async_scanner_watchdog, SCANNER_WATCHDOG_INTERVAL
+            )
+
+    @hass_callback
+    def _async_watchdog_triggered(self) -> bool:
+        """Check if the watchdog has been triggered."""
+        time_since_last_detection = MONOTONIC_TIME() - self._last_detection
+        _LOGGER.debug(
+            "%s: Scanner watchdog time_since_last_detection: %s",
+            self.name,
+            time_since_last_detection,
+        )
+        return time_since_last_detection > SCANNER_WATCHDOG_TIMEOUT
+
+    async def _async_scanner_watchdog(self, now: datetime.datetime) -> None:
+        """Check if the scanner is running.
+
+        Override this method if you need to do something else when the watchdog is triggered.
+        """
+        if self._async_watchdog_triggered():
+            _LOGGER.info(
+                "%s: Bluetooth scanner has gone quiet for %ss, check logs on the scanner device for more information",
+                self.name,
+                SCANNER_WATCHDOG_TIMEOUT,
+            )
 
     @contextmanager
     def connecting(self) -> Generator[None, None, None]:
@@ -84,7 +139,13 @@ class BaseHaScanner(ABC):
     async def async_diagnostics(self) -> dict[str, Any]:
         """Return diagnostic information about the scanner."""
         return {
+            "name": self.name,
+            "start_time": self._start_time,
+            "source": self.source,
+            "scanning": self.scanning,
             "type": self.__class__.__name__,
+            "last_detection": self._last_detection,
+            "monotonic_time": MONOTONIC_TIME(),
             "discovered_devices_and_advertisement_data": [
                 {
                     "name": device_adv[0].name,
@@ -120,14 +181,13 @@ class BaseHaRemoteScanner(BaseHaScanner):
         connectable: bool,
     ) -> None:
         """Initialize the scanner."""
-        super().__init__(hass, scanner_id, name)
+        super().__init__(hass, scanner_id, name, connector)
         self._new_info_callback = new_info_callback
         self._discovered_device_advertisement_datas: dict[
             str, tuple[BLEDevice, AdvertisementData]
         ] = {}
         self._discovered_device_timestamps: dict[str, float] = {}
         self.connectable = connectable
-        self.connector = connector
         self._details: dict[str, str | HaBluetoothConnector] = {"source": scanner_id}
         self._expire_seconds = FALLBACK_MAXIMUM_STALE_ADVERTISEMENT_SECONDS
         assert models.MANAGER is not None
@@ -154,10 +214,12 @@ class BaseHaRemoteScanner(BaseHaScanner):
         cancel_stop = self.hass.bus.async_listen(
             EVENT_HOMEASSISTANT_STOP, self._save_history
         )
+        self._async_setup_scanner_watchdog()
 
         @hass_callback
         def _cancel() -> None:
             self._save_history()
+            self._async_stop_scanner_watchdog()
             cancel_track()
             cancel_stop()
 
@@ -216,6 +278,7 @@ class BaseHaRemoteScanner(BaseHaScanner):
     ) -> None:
         """Call the registered callback."""
         now = MONOTONIC_TIME()
+        self._last_detection = now
         if prev_discovery := self._discovered_device_advertisement_datas.get(address):
             # Merge the new data with the old data
             # to function the same as BlueZ which
@@ -278,16 +341,15 @@ class BaseHaRemoteScanner(BaseHaScanner):
 
     async def async_diagnostics(self) -> dict[str, Any]:
         """Return diagnostic information about the scanner."""
+        now = MONOTONIC_TIME()
         return await super().async_diagnostics() | {
-            "type": self.__class__.__name__,
-            "discovered_devices_and_advertisement_data": [
-                {
-                    "name": device_adv[0].name,
-                    "address": device_adv[0].address,
-                    "rssi": device_adv[0].rssi,
-                    "advertisement_data": device_adv[1],
-                    "details": device_adv[0].details,
-                }
-                for device_adv in self.discovered_devices_and_advertisement_data.values()
-            ],
+            "storage": self._storage.async_get_advertisement_history_as_dict(
+                self.source
+            ),
+            "connectable": self.connectable,
+            "discovered_device_timestamps": self._discovered_device_timestamps,
+            "time_since_last_device_detection": {
+                address: now - timestamp
+                for address, timestamp in self._discovered_device_timestamps.items()
+            },
         }
