@@ -1,20 +1,23 @@
 """Helper functions for webOS Smart TV."""
+
 from __future__ import annotations
 
+from aiowebostv import WebOsClient
+
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntry
 
-from . import WebOsClientWrapper, async_control_connect
-from .const import DATA_CONFIG_ENTRY, DOMAIN, LIVE_TV_APP_ID, WEBOSTV_EXCEPTIONS
+from . import async_control_connect
+from .const import DOMAIN, LIVE_TV_APP_ID, WEBOSTV_EXCEPTIONS
 
 
 @callback
 def async_get_device_entry_by_device_id(
     hass: HomeAssistant, device_id: str
 ) -> DeviceEntry:
-    """
-    Get Device Entry from Device Registry by device ID.
+    """Get Device Entry from Device Registry by device ID.
 
     Raises ValueError if device ID is invalid.
     """
@@ -27,8 +30,7 @@ def async_get_device_entry_by_device_id(
 
 @callback
 def async_get_device_id_from_entity_id(hass: HomeAssistant, entity_id: str) -> str:
-    """
-    Get device ID from an entity ID.
+    """Get device ID from an entity ID.
 
     Raises ValueError if entity or device ID is invalid.
     """
@@ -46,25 +48,26 @@ def async_get_device_id_from_entity_id(hass: HomeAssistant, entity_id: str) -> s
 
 
 @callback
-def async_get_client_wrapper_by_device_entry(
+def async_get_client_by_device_entry(
     hass: HomeAssistant, device: DeviceEntry
-) -> WebOsClientWrapper:
-    """
-    Get WebOsClientWrapper from Device Registry by device entry.
+) -> WebOsClient:
+    """Get WebOsClient from Device Registry by device entry.
 
-    Raises ValueError if client wrapper is not found.
+    Raises ValueError if client is not found.
     """
     for config_entry_id in device.config_entries:
-        wrapper: WebOsClientWrapper | None
-        if wrapper := hass.data[DOMAIN][DATA_CONFIG_ENTRY].get(config_entry_id):
-            break
+        entry = hass.config_entries.async_get_entry(config_entry_id)
+        if entry and entry.domain == DOMAIN:
+            if entry.state is ConfigEntryState.LOADED:
+                return entry.runtime_data
 
-    if not wrapper:
-        raise ValueError(
-            f"Device {device.id} is not from an existing {DOMAIN} config entry"
-        )
+            raise ValueError(
+                f"Device {device.id} is not from a loaded {DOMAIN} config entry"
+            )
 
-    return wrapper
+    raise ValueError(
+        f"Device {device.id} is not from an existing {DOMAIN} config entry"
+    )
 
 
 async def async_get_sources(host: str, key: str) -> list[str]:
